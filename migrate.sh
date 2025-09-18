@@ -44,14 +44,22 @@ printf "${_RESET}\n"
 
 section "Validating environment variables"
 
-section "Checking if SOURCE_REDIS_URL is set and not empty"
-
-# Validate that SOURCE_REDIS_URL environment variable exists
-if [ -z "$SOURCE_REDIS_URL" ]; then
-    error_exit "SOURCE_REDIS_URL environment variable is not set."
+section "Checking RESTORE_RDB_PATH (optional)"
+if [ -n "$RESTORE_RDB_PATH" ]; then
+  write_ok "RESTORE_RDB_PATH detected: $RESTORE_RDB_PATH"
 fi
 
-write_ok "SOURCE_REDIS_URL correctly set"
+section "Checking if SOURCE_REDIS_URL is set and not empty (required only if RESTORE_RDB_PATH is not set)"
+
+# Validate that SOURCE_REDIS_URL environment variable exists only when not restoring from file
+if [ -z "$RESTORE_RDB_PATH" ]; then
+  if [ -z "$SOURCE_REDIS_URL" ]; then
+    error_exit "SOURCE_REDIS_URL environment variable is not set and RESTORE_RDB_PATH is not provided."
+  fi
+  write_ok "SOURCE_REDIS_URL correctly set"
+else
+  write_warn "Skipping SOURCE_REDIS_URL validation because RESTORE_RDB_PATH is set"
+fi
 
 section "Checking if TARGET_REDIS_URL is set and not empty"
 
@@ -120,20 +128,39 @@ Set the OVERWRITE_DATABASE environment variable to overwrite the new database."
   write_warn "The new database is not empty. Found OVERWRITE_DATABASE environment variable. Proceeding with restore."
 fi
 
-section "Dumping database from SOURCE_REDIS_URL"
-
 dump_file="/data/redis_dump.rdb"
+did_dump="false"
 
-redis-cli -u $SOURCE_REDIS_URL --rdb "$dump_file" || error_exit "Failed to dump database from $SOURCE_REDIS_URL."
+if [ -n "$RESTORE_RDB_PATH" ]; then
+  section "Using provided RDB file (RESTORE_RDB_PATH)"
+  src="$RESTORE_RDB_PATH"
+  if [ ! -f "$src" ] && [ -f "${BACKUP_DIR%/}/$src" ]; then
+    src="${BACKUP_DIR%/}/$src"
+  fi
+  if [ ! -f "$src" ]; then
+    error_exit "RESTORE_RDB_PATH file not found: $RESTORE_RDB_PATH (also checked in $BACKUP_DIR)"
+  fi
+  case "$src" in
+    *.rdb) cp -f "$src" "$dump_file" || error_exit "Failed to copy $src" ;;
+    *.rdb.gz|*.gz) gunzip -c "$src" > "$dump_file" || error_exit "Failed to decompress $src" ;;
+    *) error_exit "RESTORE_RDB_PATH must point to .rdb or .rdb.gz" ;;
+  esac
+  write_ok "Selected restore source: $src"
+else
+  section "Dumping database from SOURCE_REDIS_URL"
 
-write_ok "Successfully saved dump to $dump_file"
+  redis-cli -u $SOURCE_REDIS_URL --rdb "$dump_file" || error_exit "Failed to dump database from $SOURCE_REDIS_URL."
+
+  write_ok "Successfully saved dump to $dump_file"
+  did_dump="true"
+fi
 
 dump_file_size=$(ls -lh "$dump_file" | awk '{print $5}')
 
 write_ok "Dump file size: $dump_file_size"
 
 # Save backup copy (compressed by policy)
-if [ "$is_backup_enabled" = "true" ]; then
+if [ "$is_backup_enabled" = "true" ] && [ "$did_dump" = "true" ]; then
   section "Saving backup snapshot to $BACKUP_DIR"
 
   # Base backup filename (without compression suffix)
@@ -222,6 +249,19 @@ if [ -f "$protocol_file" ]; then
 fi
 
 write_ok "Successfully cleaned up"
+
+section "Listing available backups in $BACKUP_DIR"
+pattern="${BACKUP_PREFIX}_*.rdb*"
+if [ -d "$BACKUP_DIR" ]; then
+  files=$(ls -1t "$BACKUP_DIR"/$pattern 2>/dev/null || true)
+  if [ -n "$files" ]; then
+    ls -lh -t "$BACKUP_DIR"/$pattern 2>/dev/null
+  else
+    write_warn "No backups found matching ${pattern} in $BACKUP_DIR"
+  fi
+else
+  write_warn "BACKUP_DIR '$BACKUP_DIR' does not exist"
+fi
 
 printf "${_RESET}\n"
 printf "${_RESET}\n"
