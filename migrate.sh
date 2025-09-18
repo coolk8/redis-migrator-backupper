@@ -44,31 +44,55 @@ printf "${_RESET}\n"
 
 section "Validating environment variables"
 
+# BACKUP_ONLY mode (optional)
+BACKUP_ONLY="${BACKUP_ONLY:-false}"
+is_backup_only="false"
+case "$BACKUP_ONLY" in
+  [Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1) is_backup_only="true" ;;
+esac
+if [ "$is_backup_only" = "true" ]; then
+  write_ok "BACKUP_ONLY mode enabled: will perform backup snapshot only and skip restore"
+fi
+
 section "Checking RESTORE_RDB_PATH (optional)"
 if [ -n "$RESTORE_RDB_PATH" ]; then
   write_ok "RESTORE_RDB_PATH detected: $RESTORE_RDB_PATH"
+  if [ "$is_backup_only" = "true" ]; then
+    write_warn "BACKUP_ONLY is enabled: RESTORE_RDB_PATH will be ignored"
+  fi
 fi
 
-section "Checking if SOURCE_REDIS_URL is set and not empty (required only if RESTORE_RDB_PATH is not set)"
+section "Checking if SOURCE_REDIS_URL is set and not empty"
 
-# Validate that SOURCE_REDIS_URL environment variable exists only when not restoring from file
-if [ -z "$RESTORE_RDB_PATH" ]; then
+# Validate SOURCE_REDIS_URL
+if [ "$is_backup_only" = "true" ]; then
   if [ -z "$SOURCE_REDIS_URL" ]; then
-    error_exit "SOURCE_REDIS_URL environment variable is not set and RESTORE_RDB_PATH is not provided."
+    error_exit "BACKUP_ONLY is enabled, but SOURCE_REDIS_URL is not set."
   fi
   write_ok "SOURCE_REDIS_URL correctly set"
 else
-  write_warn "Skipping SOURCE_REDIS_URL validation because RESTORE_RDB_PATH is set"
+  if [ -z "$RESTORE_RDB_PATH" ]; then
+    if [ -z "$SOURCE_REDIS_URL" ]; then
+      error_exit "SOURCE_REDIS_URL environment variable is not set and RESTORE_RDB_PATH is not provided."
+    fi
+    write_ok "SOURCE_REDIS_URL correctly set"
+  else
+    write_warn "Skipping SOURCE_REDIS_URL validation because RESTORE_RDB_PATH is set"
+  fi
 fi
 
 section "Checking if TARGET_REDIS_URL is set and not empty"
 
-# Validate that TARGET_REDIS_URL environment variable exists
-if [ -z "$TARGET_REDIS_URL" ]; then
-    error_exit "TARGET_REDIS_URL environment variable is not set."
-fi
+if [ "$is_backup_only" = "true" ]; then
+  write_warn "Skipping TARGET_REDIS_URL validation because BACKUP_ONLY is enabled"
+else
+  # Validate that TARGET_REDIS_URL environment variable exists
+  if [ -z "$TARGET_REDIS_URL" ]; then
+      error_exit "TARGET_REDIS_URL environment variable is not set."
+  fi
 
-write_ok "TARGET_REDIS_URL correctly set"
+  write_ok "TARGET_REDIS_URL correctly set"
+fi
 
 # Backup configuration (with defaults)
 section "Preparing backup configuration"
@@ -105,6 +129,9 @@ if [ "$is_backup_enabled" = "true" ]; then
     write_warn "Retention (count) not set"
   fi
 else
+  if [ "$is_backup_only" = "true" ]; then
+    error_exit "BACKUP_ONLY mode requires BACKUP_ENABLED=true. Enable backups or disable BACKUP_ONLY."
+  fi
   write_warn "Backups are disabled (BACKUP_ENABLED=$BACKUP_ENABLED)"
 fi
 
@@ -115,23 +142,34 @@ else
   ts=$(date +%Y%m%d-%H%M%S)
 fi
 
-# Query to check if there are any tables in the new database
-output=$(echo 'DBSIZE' | redis-cli -u $TARGET_REDIS_URL)
+if [ "$is_backup_only" != "true" ]; then
+  # Query to check if there are any tables in the new database
+  output=$(echo 'DBSIZE' | redis-cli -u $TARGET_REDIS_URL)
 
-if [[ "$output" == *"0"* ]]; then
-  write_ok "The new database is empty. Proceeding with restore."
-else
-  if [ -z "$OVERWRITE_DATABASE" ]; then
-    error_exit "The new database is not empty. Aborting migration.
+  if [[ "$output" == *"0"* ]]; then
+    write_ok "The new database is empty. Proceeding with restore."
+  else
+    if [ -z "$OVERWRITE_DATABASE" ]; then
+      error_exit "The new database is not empty. Aborting migration.
 Set the OVERWRITE_DATABASE environment variable to overwrite the new database."
+    fi
+    write_warn "The new database is not empty. Found OVERWRITE_DATABASE environment variable. Proceeding with restore."
   fi
-  write_warn "The new database is not empty. Found OVERWRITE_DATABASE environment variable. Proceeding with restore."
+else
+  write_warn "Skipping target database state check because BACKUP_ONLY is enabled"
 fi
 
 dump_file="/data/redis_dump.rdb"
 did_dump="false"
 
-if [ -n "$RESTORE_RDB_PATH" ]; then
+if [ "$is_backup_only" = "true" ]; then
+  section "Dumping database from SOURCE_REDIS_URL (backup-only mode)"
+
+  redis-cli -u $SOURCE_REDIS_URL --rdb "$dump_file" || error_exit "Failed to dump database from $SOURCE_REDIS_URL."
+
+  write_ok "Successfully saved dump to $dump_file"
+  did_dump="true"
+elif [ -n "$RESTORE_RDB_PATH" ]; then
   section "Using provided RDB file (RESTORE_RDB_PATH)"
   src="$RESTORE_RDB_PATH"
   if [ ! -f "$src" ] && [ -f "${BACKUP_DIR%/}/$src" ]; then
@@ -217,6 +255,38 @@ if [ "$is_backup_enabled" = "true" ] && [ "$did_dump" = "true" ]; then
       write_ok "No excess backups to remove by count"
     fi
   fi
+fi
+
+# In backup-only mode, skip restore and exit after listing backups
+if [ "$is_backup_only" = "true" ]; then
+  section "Backup-only mode: skipping restore steps"
+
+  section "Cleaning up"
+  if [ -f "$dump_file" ]; then
+    write_ok "Removing $dump_file"
+    rm -f "$dump_file"
+    write_ok "Successfully removed $dump_file"
+  fi
+
+  section "Listing available backups in $BACKUP_DIR"
+  pattern="${BACKUP_PREFIX}_*.rdb*"
+  if [ -d "$BACKUP_DIR" ]; then
+    files=$(ls -1t "$BACKUP_DIR"/$pattern 2>/dev/null || true)
+    if [ -n "$files" ]; then
+      ls -lh -t "$BACKUP_DIR"/$pattern 2>/dev/null
+    else
+      write_warn "No backups found matching ${pattern} in $BACKUP_DIR"
+    fi
+  else
+    write_warn "BACKUP_DIR '$BACKUP_DIR' does not exist"
+  fi
+
+  printf "${_RESET}\n"
+  printf "${_RESET}\n"
+  echo "${_BOLD}${_GREEN}Backup completed successfully${_RESET}"
+  printf "${_RESET}\n"
+  printf "${_RESET}\n"
+  exit 0
 fi
 
 section "Converting RDB to Redis protocol"

@@ -82,6 +82,12 @@
 - В конце работы всегда выводится список доступных бэкапов из BACKUP_DIR.
 
 
+## Режим только бэкап (BACKUP_ONLY)
+
+- BACKUP_ONLY=true|yes|1 — включает режим, в котором скрипт делает только RDB‑снимок источника и сохраняет его в BACKUP_DIR, не выполняя восстановление в целевую БД.
+- Требования: SOURCE_REDIS_URL обязателен; BACKUP_ENABLED должно быть включено. TARGET_REDIS_URL не требуется. RESTORE_RDB_PATH игнорируется.
+- Поведение: выполняется `redis-cli --rdb` из `SOURCE_REDIS_URL`, файл сохраняется в `BACKUP_DIR` с учётом `BACKUP_PREFIX`/`BACKUP_COMPRESS`/`BACKUP_RETENTION_*`. Этапы конвертации и загрузки в `TARGET_REDIS_URL` пропускаются. В конце выводится список имеющихся бэкапов.
+
 ## Примеры запуска
 
 Типичная миграция (дамп из источника + запись бэкапа + восстановление в целевую):
@@ -135,6 +141,28 @@ docker run --rm ^
   -e RESTORE_RDB_PATH=redis-backup_20250918-120000.rdb.gz ^
   -e TARGET_REDIS_URL=redis://:pass@dst.example.com:6379/0 ^
   -e OVERWRITE_DATABASE=1 ^
+  -v C:\host\backup:/backup ^
+  your-image:tag
+```
+
+Пример только бэкапа (без восстановления):
+```bash
+docker run --rm \
+  -e BACKUP_ONLY=1 \
+  -e SOURCE_REDIS_URL=redis://:pass@src.example.com:6379/0 \
+  -e BACKUP_RETENTION_COUNT=7 \
+  -e BACKUP_RETENTION_DAYS=14 \
+  -v /var/backups/redis:/backup \
+  your-image:tag
+```
+
+Docker (Windows PowerShell/CMD) — пример только бэкапа:
+```powershell
+docker run --rm ^
+  -e BACKUP_ONLY=1 ^
+  -e SOURCE_REDIS_URL=redis://:pass@src.example.com:6379/0 ^
+  -e BACKUP_RETENTION_COUNT=7 ^
+  -e BACKUP_RETENTION_DAYS=14 ^
   -v C:\host\backup:/backup ^
   your-image:tag
 ```
