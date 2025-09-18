@@ -289,13 +289,13 @@ if [ "$is_backup_only" = "true" ]; then
   exit 0
 fi
 
-section "Converting RDB to Redis protocol"
+section "Converting RDB to AOF (RESP)"
 
 protocol_file="/data/redis_dump.protocol"
 
-rdb -c protocol "$dump_file" > "$protocol_file" || error_exit "Failed to convert RDB to protocol."
+rdb -c aof -o "$protocol_file" "$dump_file" || error_exit "Failed to convert RDB to AOF (protocol)."
 
-write_ok "Converted rdb to protocol file"
+write_ok "Converted RDB to AOF protocol file"
 
 section "Restoring database to TARGET_REDIS_URL"
 

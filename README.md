@@ -14,7 +14,7 @@
 
 Содержимое репозитория:
 - migrate.sh — основной скрипт миграции/бэкапа.
-- Dockerfile — сборка образа (redis-cli, rdbtools и т.д.).
+- Dockerfile — multi-stage сборка из исходников: Go-утилита rdb (HDT3213/rdb), redis-tools и gzip.
 
 
 ## Как это работает
@@ -40,7 +40,7 @@
      - По дням: удаление файлов старше BACKUP_RETENTION_DAYS.
      - По количеству: хранение только BACKUP_RETENTION_COUNT последних файлов.
 
-5) Конвертация временного RDB в Redis protocol (через `rdb -c protocol`) и загрузка в целевую БД через `redis-cli --pipe`.
+5) Конвертация временного RDB в AOF (RESP) через `rdb -c aof -o` и загрузка в целевую БД через `redis-cli --pipe`.
 
 6) Очистка временных файлов (`/data/redis_dump.rdb`, `/data/redis_dump.protocol`).
 
